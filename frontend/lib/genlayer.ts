@@ -1,9 +1,6 @@
 import { createClient } from "genlayer-js";
 import { testnetBradbury } from "genlayer-js/chains";
-import {
-  TransactionStatus,
-  ExecutionResult,
-} from "genlayer-js/types";
+import { ExecutionResult } from "genlayer-js/types";
 
 /* =========================================================
    TYPES
@@ -30,6 +27,40 @@ export type Policy = {
 };
 
 /* =========================================================
+   TRANSACTION TYPES
+   ========================================================= */
+
+export type GenLayerStatusName =
+  | "UNINITIALIZED"
+  | "PENDING"
+  | "PROPOSING"
+  | "COMMITTING"
+  | "REVEALING"
+  | "ACCEPTED"
+  | "UNDETERMINED"
+  | "FINALIZED"
+  | "CANCELED"
+  | "APPEAL_REVEALING"
+  | "APPEAL_COMMITTING"
+  | "VALIDATORS_TIMEOUT"
+  | "LEADER_TIMEOUT"
+  | "LEADER_REVEALING"
+  | "UNKNOWN";
+
+export type GenLayerTransactionSnapshot = {
+  hash: string;
+  statusName: GenLayerStatusName;
+  statusCode?: number;
+  txExecutionResultName?: string;
+  lifecycle?: string;
+  queuePosition?: number | null;
+  projectedStatus?: string | null;
+  resolutionAction?: string | null;
+  resolutionSource?: string | null;
+  updatedAt: number;
+};
+
+/* =========================================================
    CONFIGURATION
    ========================================================= */
 
@@ -48,13 +79,6 @@ const BRADBURY_NETWORK = {
     decimals: 18,
   },
 
-  /*
-   * IMPORTANT:
-   *
-   * We intentionally use the direct GenLayer Chain RPC
-   * here because this is the RPC that successfully handled
-   * MetaMask eth_sendRawTransaction in our testing.
-   */
   rpcUrls: [
     "https://rpc.testnet-chain.genlayer.com",
   ],
@@ -82,15 +106,6 @@ export function contractAddress(): `0x${string}` {
    READ CLIENT
    ========================================================= */
 
-/*
- * Reads use the normal GenLayer Bradbury client.
- *
- * This is intentional.
- *
- * GenLayer RPC provides the GenLayer-specific methods
- * required for intelligent-contract reads and transaction
- * state.
- */
 export function readClient() {
   return createClient({
     chain: testnetBradbury,
@@ -101,10 +116,6 @@ export function readClient() {
    WALLET / NETWORK MANAGEMENT
    ========================================================= */
 
-/**
- * Make sure MetaMask is connected to GenLayer Bradbury
- * using the direct GenLayer Chain RPC.
- */
 async function ensureBradburyNetwork(
   provider: EthereumProvider
 ) {
@@ -118,9 +129,6 @@ async function ensureBradburyNetwork(
     currentChainId
   );
 
-  /*
-   * Already on Bradbury.
-   */
   if (
     String(currentChainId).toLowerCase() ===
     BRADBURY_CHAIN_ID
@@ -128,10 +136,6 @@ async function ensureBradburyNetwork(
     return;
   }
 
-  /*
-   * Try switching to Bradbury if it already exists
-   * in MetaMask.
-   */
   try {
     await provider.request({
       method: "wallet_switchEthereumChain",
@@ -149,18 +153,11 @@ async function ensureBradburyNetwork(
       switchError
     );
 
-    /*
-     * MetaMask error 4902 means the chain does not
-     * exist in the wallet.
-     */
     if (switchError?.code !== 4902) {
       throw switchError;
     }
   }
 
-  /*
-   * Add Bradbury using the DIRECT Chain RPC.
-   */
   await provider.request({
     method: "wallet_addEthereumChain",
     params: [
@@ -168,9 +165,6 @@ async function ensureBradburyNetwork(
     ],
   });
 
-  /*
-   * Switch again after adding.
-   */
   await provider.request({
     method: "wallet_switchEthereumChain",
     params: [
@@ -198,15 +192,8 @@ export async function connectWallet() {
   const provider =
     (window as any).ethereum as EthereumProvider;
 
-  /*
-   * Configure/switch MetaMask BEFORE requesting
-   * the wallet account.
-   */
   await ensureBradburyNetwork(provider);
 
-  /*
-   * Request wallet permission.
-   */
   const accounts =
     (await provider.request({
       method: "eth_requestAccounts",
@@ -221,9 +208,6 @@ export async function connectWallet() {
   const address =
     accounts[0] as `0x${string}`;
 
-  /*
-   * Verify the final network.
-   */
   const finalChainId =
     await provider.request({
       method: "eth_chainId",
@@ -243,14 +227,6 @@ export async function connectWallet() {
     address
   );
 
-  console.log(
-    "Network: GenLayer Testnet Bradbury"
-  );
-
-  console.log(
-    "RPC: https://rpc.testnet-chain.genlayer.com"
-  );
-
   return {
     address,
     provider,
@@ -261,20 +237,6 @@ export async function connectWallet() {
    WRITE CLIENT
    ========================================================= */
 
-/**
- * Create the wallet-backed GenLayerJS client.
- *
- * IMPORTANT:
- *
- * We DO NOT call:
- *
- *   client.connect("testnetBradbury")
- *
- * here.
- *
- * MetaMask has already been configured manually through
- * ensureBradburyNetwork().
- */
 function writeClient(
   address: `0x${string}`,
   provider: EthereumProvider
@@ -292,7 +254,7 @@ function writeClient(
 
 export async function readPolicies(
   address: string
-) {
+): Promise<Policy[]> {
   const client = readClient();
 
   const result =
@@ -309,58 +271,366 @@ export async function readPolicies(
 }
 
 /* =========================================================
-   WAIT FOR TRANSACTION
+   NORMALIZE GENLAYER STATUS
    ========================================================= */
 
-async function wait(
-  client: any,
-  hash: any,
-  retries: number
-) {
-  console.log(
-    "Waiting for transaction:",
-    hash
-  );
+function normalizeStatus(
+  value: unknown
+): GenLayerStatusName {
+  const status =
+    String(value || "")
+      .trim()
+      .toUpperCase()
+      .replace(/[\s-]+/g, "_");
 
-  const receipt =
-    await client.waitForTransactionReceipt({
-      hash,
+  switch (status) {
+    case "UNINITIALIZED":
+      return "UNINITIALIZED";
 
-      status:
-        TransactionStatus.FINALIZED,
+    case "PENDING":
+      return "PENDING";
 
-      interval: 5000,
+    case "PROPOSING":
+      return "PROPOSING";
 
-      retries,
-    });
+    case "COMMITTING":
+      return "COMMITTING";
 
-  console.log(
-    "Transaction finalized:",
-    receipt
-  );
+    case "REVEALING":
+      return "REVEALING";
 
-  /*
-   * Check contract execution result.
-   */
+    case "ACCEPTED":
+      return "ACCEPTED";
+
+    case "UNDETERMINED":
+      return "UNDETERMINED";
+
+    case "FINALIZED":
+      return "FINALIZED";
+
+    case "CANCELED":
+    case "CANCELLED":
+      return "CANCELED";
+
+    case "APPEAL_REVEALING":
+      return "APPEAL_REVEALING";
+
+    case "APPEAL_COMMITTING":
+      return "APPEAL_COMMITTING";
+
+    case "VALIDATORS_TIMEOUT":
+      return "VALIDATORS_TIMEOUT";
+
+    case "LEADER_TIMEOUT":
+      return "LEADER_TIMEOUT";
+
+    case "LEADER_REVEALING":
+      return "LEADER_REVEALING";
+
+    default:
+      return "UNKNOWN";
+  }
+}
+
+/* =========================================================
+   NUMBER HELPER
+   ========================================================= */
+
+function normalizeNumber(
+  value: unknown
+): number | undefined {
   if (
-    receipt.txExecutionResultName &&
-    receipt.txExecutionResultName !==
-      ExecutionResult.FINISHED_WITH_RETURN
+    value === null ||
+    value === undefined
   ) {
+    return undefined;
+  }
+
+  const numberValue =
+    Number(value);
+
+  return Number.isFinite(numberValue)
+    ? numberValue
+    : undefined;
+}
+
+/* =========================================================
+   GET TRANSACTION STATUS
+   ========================================================= */
+
+/**
+ * Reads the persisted GenLayer transaction state.
+ *
+ * IMPORTANT:
+ *
+ * This does NOT invent a timeout or assume that a transaction
+ * failed just because some amount of time has passed.
+ *
+ * The GenLayer transaction itself remains the source of truth.
+ */
+export async function getTransactionSnapshot(
+  hash: string
+): Promise<GenLayerTransactionSnapshot> {
+  if (!hash) {
     throw new Error(
-      `Transaction finalized but execution failed: ${String(
-        receipt.txExecutionResultName
-      )}`
+      "Transaction hash is missing."
     );
   }
 
-  return receipt;
+  const client: any =
+    readClient();
+
+  if (
+    typeof client.getTransaction !==
+    "function"
+  ) {
+    throw new Error(
+      "This genlayer-js version does not expose getTransaction(). Please update genlayer-js."
+    );
+  }
+
+  const transaction =
+    await client.getTransaction({
+      hash,
+    });
+
+  const statusName =
+    normalizeStatus(
+      transaction?.statusName ??
+      transaction?.status
+    );
+
+  let projectedStatus:
+    string | null = null;
+
+  let resolutionAction:
+    string | null = null;
+
+  let resolutionSource:
+    string | null = null;
+
+  /*
+   * Newer GenLayerJS versions expose the
+   * advanced lifecycle API.
+   *
+   * This is optional so older compatible
+   * SDK versions do not break the app.
+   */
+  try {
+    if (
+      client.advanced &&
+      typeof client.advanced
+        .getTransactionLifecycle ===
+        "function"
+    ) {
+      const lifecycle =
+        await client.advanced
+          .getTransactionLifecycle({
+            hash,
+          });
+
+      projectedStatus =
+        lifecycle?.projectedStatus ??
+        null;
+
+      resolutionAction =
+        lifecycle?.resolutionAction ??
+        null;
+
+      resolutionSource =
+        lifecycle?.resolutionSource ??
+        null;
+    }
+  } catch (lifecycleError) {
+    console.warn(
+      "Lifecycle projection unavailable:",
+      lifecycleError
+    );
+  }
+
+  return {
+    hash,
+
+    statusName,
+
+    statusCode:
+      normalizeNumber(
+        transaction?.status
+      ),
+
+    txExecutionResultName:
+      transaction?.txExecutionResultName ??
+      undefined,
+
+    lifecycle:
+      transaction?.lifecycle ??
+      undefined,
+
+    queuePosition:
+      transaction?.queuePosition ===
+      undefined
+        ? null
+        : normalizeNumber(
+            transaction.queuePosition
+          ) ?? null,
+
+    projectedStatus,
+
+    resolutionAction,
+
+    resolutionSource,
+
+    updatedAt: Date.now(),
+  };
+}
+
+/* =========================================================
+   WAIT / POLL TRANSACTION
+   ========================================================= */
+
+/**
+ * Polls a GenLayer transaction until FINALIZED.
+ *
+ * Unlike the previous implementation, this does not use
+ * a short fixed retry window such as 10 or 15 minutes.
+ *
+ * The UI can remain open or refresh the page and resume
+ * monitoring the same transaction hash.
+ */
+export async function monitorTransaction(
+  hash: string,
+  onUpdate?: (
+    snapshot: GenLayerTransactionSnapshot
+  ) => void,
+  options?: {
+    interval?: number;
+    maxAttempts?: number;
+  }
+): Promise<GenLayerTransactionSnapshot> {
+  const interval =
+    options?.interval ?? 5000;
+
+  /*
+   * 12 hours at 5 seconds.
+   *
+   * This is only a browser monitoring safety limit.
+   * It is NOT treated as an on-chain transaction failure.
+   *
+   * If the page is refreshed after this point, the
+   * persisted hash can be monitored again.
+   */
+  const maxAttempts =
+    options?.maxAttempts ??
+    Math.floor(
+      (12 * 60 * 60 * 1000) /
+        interval
+    );
+
+  let attempts = 0;
+
+  let lastError:
+    unknown = null;
+
+  while (
+    attempts < maxAttempts
+  ) {
+    attempts++;
+
+    try {
+      const snapshot =
+        await getTransactionSnapshot(
+          hash
+        );
+
+      lastError = null;
+
+      onUpdate?.(
+        snapshot
+      );
+
+      /*
+       * Finalized is the terminal successful
+       * consensus lifecycle state.
+       */
+      if (
+        snapshot.statusName ===
+        "FINALIZED"
+      ) {
+        return snapshot;
+      }
+
+      /*
+       * Canceled is terminal.
+       */
+      if (
+        snapshot.statusName ===
+        "CANCELED"
+      ) {
+        return snapshot;
+      }
+    } catch (error) {
+      lastError = error;
+
+      console.warn(
+        "Transaction status polling failed:",
+        error
+      );
+    }
+
+    await new Promise<void>(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          interval
+        )
+    );
+  }
+
+  /*
+   * Do NOT say that the transaction failed.
+   *
+   * The hash already exists and the chain
+   * remains the authority.
+   */
+  if (lastError) {
+    throw new Error(
+      `Transaction monitoring is temporarily unavailable. The transaction was already submitted and can be resumed using hash ${hash}.`
+    );
+  }
+
+  throw new Error(
+    `Transaction monitoring paused after a long wait. The transaction was already submitted and can be resumed using hash ${hash}.`
+  );
+}
+
+/* =========================================================
+   EXECUTION SUCCESS CHECK
+   ========================================================= */
+
+export function isSuccessfulExecution(
+  snapshot: GenLayerTransactionSnapshot
+): boolean {
+  return (
+    snapshot.txExecutionResultName ===
+    ExecutionResult.FINISHED_WITH_RETURN
+  );
 }
 
 /* =========================================================
    CREATE POLICY
    ========================================================= */
 
+/**
+ * IMPORTANT:
+ *
+ * This function ONLY submits the transaction.
+ *
+ * Once a hash exists, ownership of the transaction
+ * moves to the persistent frontend tracker.
+ *
+ * This prevents the wallet submission from being
+ * coupled to a fragile frontend timeout.
+ */
 export async function createPolicy(
   address: `0x${string}`,
   provider: EthereumProvider,
@@ -372,11 +642,10 @@ export async function createPolicy(
     payoutAmount: string;
   },
 
-  onHash: (h: string) => void
+  onHash: (
+    hash: string
+  ) => void
 ) {
-  /*
-   * Verify the wallet network before writing.
-   */
   const chainId =
     await provider.request({
       method: "eth_chainId",
@@ -416,11 +685,6 @@ export async function createPolicy(
     data.flightNumber
   );
 
-  /*
-   * Send transaction.
-   *
-   * MetaMask handles signing.
-   */
   const hash =
     await client.writeContract({
       address:
@@ -439,35 +703,47 @@ export async function createPolicy(
       value: BigInt(0),
     });
 
+  const txHash =
+    String(hash);
+
   console.log(
     "Policy transaction submitted:",
-    hash
+    txHash
   );
 
-  onHash(
-    String(hash)
-  );
+  /*
+   * IMPORTANT:
+   *
+   * Call onHash immediately.
+   *
+   * The page will persist this hash before
+   * starting the long-running tracker.
+   */
+  onHash(txHash);
 
-  return wait(
-    client,
-    hash,
-    120
-  );
+  return txHash;
 }
 
 /* =========================================================
    EVALUATE POLICY
    ========================================================= */
 
+/**
+ * Submits an evaluate_policy transaction.
+ *
+ * The transaction is NOT waited on here.
+ *
+ * The persistent frontend tracker owns monitoring.
+ */
 export async function evaluatePolicy(
   address: `0x${string}`,
   provider: EthereumProvider,
   id: string,
-  onHash: (h: string) => void
+
+  onHash: (
+    hash: string
+  ) => void
 ) {
-  /*
-   * Verify the wallet network before writing.
-   */
   const chainId =
     await provider.request({
       method: "eth_chainId",
@@ -502,10 +778,6 @@ export async function evaluatePolicy(
     id
   );
 
-  /*
-   * This transaction triggers the actual
-   * GenLayer Intelligent Contract evaluation.
-   */
   const hash =
     await client.writeContract({
       address:
@@ -519,22 +791,18 @@ export async function evaluatePolicy(
       value: BigInt(0),
     });
 
+  const txHash =
+    String(hash);
+
   console.log(
     "Evaluation transaction submitted:",
-    hash
-  );
-
-  onHash(
-    String(hash)
+    txHash
   );
 
   /*
-   * Evaluation takes longer because validators
-   * need to reach consensus.
+   * Persist immediately in the frontend.
    */
-  return wait(
-    client,
-    hash,
-    180
-  );
+  onHash(txHash);
+
+  return txHash;
 }
